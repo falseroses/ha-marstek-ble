@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# local V500 work
+_backup_before_v500/
+standalone_test/*.txt
+!standalone_test/TEST_README.md
+standalone_test/*.pklg
+__pycache__/
