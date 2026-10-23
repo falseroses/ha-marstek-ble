@@ -56,8 +56,9 @@ VERBOSE_LOGGER = logging.getLogger(f"{__name__}.verbose")
 VERBOSE_LOGGER.propagate = False
 VERBOSE_LOGGER.setLevel(logging.INFO)
 
-_GLOBAL_BACKOFF_LEVEL: int = 0
-_GLOBAL_BACKOFF_UNTIL: float | None = None
+# Optional commands that time out this many times in a row (while the device
+# otherwise answers) are treated as unsupported and no longer polled.
+UNSUPPORTED_AFTER_FAILURES = 3
 
 
 class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
@@ -105,6 +106,12 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         self._last_service_info: bluetooth.BluetoothServiceInfoBleak | None = None
         self._time_poll_unsub: asyncio.TimerHandle | None = None
         self._poll_lock = asyncio.Lock()
+        # Per-device backoff (one device failing must not pause the others)
+        self._backoff_level = 0
+        self._backoff_until: float | None = None
+        # Commands this device does not answer (e.g. 0x1C on Venus E 3.0)
+        self._cmd_failures: dict[int, int] = {}
+        self._unsupported_cmds: set[int] = set()
         self._initial_poll_done = False
         self._update_poll_schedule()
 
@@ -163,17 +170,37 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         self, command: int, payload: bytes = b"", delay: float = 0.3
     ) -> bool:
         """Best-effort version of _send_and_sleep that logs and continues on failure."""
+        if command in self._unsupported_cmds:
+            return False
         try:
             await self._send_and_sleep(command, payload, delay)
+            self._cmd_failures[command] = 0
             return True
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning(
-                "[%s/%s] Poll command 0x%02X failed (continuing poll): %s",
-                self.device_name,
-                self.address,
-                command,
-                err,
-            )
+            failures = self._cmd_failures.get(command, 0) + 1
+            self._cmd_failures[command] = failures
+            if (
+                command != CMD_RUNTIME_INFO
+                and failures >= UNSUPPORTED_AFTER_FAILURES
+                and self.data.field_updates
+            ):
+                self._unsupported_cmds.add(command)
+                _LOGGER.info(
+                    "[%s/%s] Command 0x%02X not answered %s times; treating it as "
+                    "unsupported by this device and no longer polling it",
+                    self.device_name,
+                    self.address,
+                    command,
+                    failures,
+                )
+            else:
+                _LOGGER.debug(
+                    "[%s/%s] Poll command 0x%02X failed (continuing poll): %s",
+                    self.device_name,
+                    self.address,
+                    command,
+                    err,
+                )
             return False
 
     def _sanitize_fast_poll_interval(self, poll_interval: int) -> int:
@@ -338,10 +365,10 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
     ) -> MarstekData:
         """Shared poll execution path (used by event and timer triggers)."""
         now = time.time()
-        if _GLOBAL_BACKOFF_UNTIL and now < _GLOBAL_BACKOFF_UNTIL:
-            remaining = _GLOBAL_BACKOFF_UNTIL - now
-            _LOGGER.warning(
-                "[%s/%s] Backoff active (global); skipping poll with %0.1fs remaining",
+        if self._backoff_until and now < self._backoff_until:
+            remaining = self._backoff_until - now
+            _LOGGER.debug(
+                "[%s/%s] Backoff active; skipping poll with %0.1fs remaining",
                 self.device_name,
                 self.address,
                 remaining,
@@ -384,7 +411,12 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         duration = time.monotonic() - start_monotonic
         self._last_poll_completed_at = time.time()
         self._initial_poll_done = True
-        had_failure = any(not c["success"] for c in self._current_poll_commands)
+        # Only a failed runtime query means the device is unreachable; optional
+        # commands that time out must not throttle polling.
+        had_failure = any(
+            not c["success"] and c["cmd"] == CMD_RUNTIME_INFO
+            for c in self._current_poll_commands
+        )
         self._handle_backoff(had_failure)
         VERBOSE_LOGGER.debug(
             "[%s/%s] Poll cycle end in %.3fs (commands=%s)",
@@ -399,28 +431,28 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         return self.data
 
     def _handle_backoff(self, had_failure: bool) -> None:
-        """Apply global backoff by pausing all polling for a window."""
-        global _GLOBAL_BACKOFF_LEVEL, _GLOBAL_BACKOFF_UNTIL
+        """Apply per-device backoff by pausing this device's polling for a window."""
         if had_failure:
-            if _GLOBAL_BACKOFF_LEVEL < len(BACKOFF_INTERVALS) - 1:
-                _GLOBAL_BACKOFF_LEVEL += 1
-            backoff_seconds = BACKOFF_INTERVALS[_GLOBAL_BACKOFF_LEVEL]
-            _GLOBAL_BACKOFF_UNTIL = time.time() + backoff_seconds
-            _LOGGER.warning(
-                "[%s/%s] Entering GLOBAL backoff level %s; pausing all polls for %ss",
+            if self._backoff_level < len(BACKOFF_INTERVALS) - 1:
+                self._backoff_level += 1
+            backoff_seconds = BACKOFF_INTERVALS[self._backoff_level]
+            self._backoff_until = time.time() + backoff_seconds
+            log = _LOGGER.warning if self._backoff_level >= 3 else _LOGGER.debug
+            log(
+                "[%s/%s] Device not answering; backoff level %s, pausing polls for %ss",
                 self.device_name,
                 self.address,
-                _GLOBAL_BACKOFF_LEVEL,
+                self._backoff_level,
                 backoff_seconds,
             )
-        elif _GLOBAL_BACKOFF_LEVEL > 0 or _GLOBAL_BACKOFF_UNTIL:
-            _LOGGER.info(
-                "[%s/%s] GLOBAL backoff cleared after successful poll",
+        elif self._backoff_level > 0 or self._backoff_until:
+            _LOGGER.debug(
+                "[%s/%s] Backoff cleared after successful poll",
                 self.device_name,
                 self.address,
             )
-            _GLOBAL_BACKOFF_LEVEL = 0
-            _GLOBAL_BACKOFF_UNTIL = None
+            self._backoff_level = 0
+            self._backoff_until = None
 
     async def _poll_fast(self) -> None:
         """Poll fast-update data (runtime info, BMS)."""
@@ -457,7 +489,7 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         """Poll medium-update data (system, WiFi, config, identity, logs)."""
         if self.is_v500:
             # The V500 only answers device info (0x04) and WiFi SSID (0x08);
-            # other queries time out and would trigger the global backoff.
+            # other queries time out.
             await self._safe_send_and_sleep(CMD_DEVICE_INFO)
             await self._safe_send_and_sleep(CMD_WIFI_SSID)
             return

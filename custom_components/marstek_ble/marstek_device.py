@@ -244,7 +244,15 @@ class MarstekProtocol:
         for byte in data[:-1]:
             expected_checksum ^= byte
         if data[-1] != expected_checksum:
-            _LOGGER.warning("Invalid checksum: expected 0x%02X, got 0x%02X", expected_checksum, data[-1])
+            # Usually a frame split across BLE notifications or an unknown
+            # push frame; harmless, the next poll delivers a complete frame.
+            _LOGGER.debug(
+                "Invalid checksum for cmd 0x%02X (len %d): expected 0x%02X, got 0x%02X",
+                data[3],
+                len(data),
+                expected_checksum,
+                data[-1],
+            )
             return False
 
         payload = data[4:-1]  # Exclude header and checksum
@@ -1057,7 +1065,7 @@ class MarstekBLEDevice:
                             cmd
                         )
                     except asyncio.TimeoutError:
-                        _LOGGER.warning(
+                        _LOGGER.debug(
                             "%s: Timeout waiting for response to command 0x%02X",
                             self._device_name,
                             cmd
