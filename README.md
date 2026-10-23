@@ -131,6 +131,14 @@ These increment-only sensors (e.g., `51.51 kWh` in, `41.07 kWh` out) are the rec
 - **Manual (Work Mode)**: command `0x09`; exposed as “Manual Mode On/Off” buttons. Mirrors the app’s “Manual” mode for manual scheduling.
 - **AI Optimization / Trade**: command `0x11`; exposed as an experimental button (“Enable AI Optimization”) and reflected in the Adaptive Mode switch state.
 
+## Grid presence (outage detection)
+
+On Venus E devices the system data frame (`0x0D`) contains the grid frequency
+(bytes 1-2, ÷10) and grid voltage (bytes 3-4, ÷10). Verified on a Venus E 3.0:
+217.9 V / 50.0 Hz with grid, 10.0 V / 1.0 Hz after cutting the grid. The
+integration polls `0x0D` every 5 s and exposes **Grid Voltage**, **Grid
+Frequency** and a **Grid Connected** binary sensor (on when voltage ≥ 150 V).
+
 ## Supported Devices
 
 - Marstek Venus E hardware v2 (`MST_ACCP_*` - tested)

@@ -14,6 +14,8 @@ from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
+from .const import GRID_PRESENT_MIN_VOLTAGE
+
 _LOGGER = logging.getLogger(__name__)
 VERBOSE_LOGGER = logging.getLogger(f"{__name__}.verbose")
 # Keep verbose logs isolated unless explicitly enabled via logger config.
@@ -83,6 +85,12 @@ class MarstekData:
     system_value_3: int | None = None
     system_value_4: int | None = None
     system_value_5: int | None = None
+    # Derived from system data (0x0D) - verified on Venus E 3.0 (VNSE3-0):
+    # value_1 = grid frequency x10 (500 on-grid, 10 off-grid)
+    # value_2 = grid voltage x10  (2179 on-grid, 100 off-grid)
+    grid_frequency: float | None = None  # Hz
+    grid_voltage: float | None = None  # V
+    grid_connected: bool | None = None
 
     # Timer info (0x13)
     adaptive_mode_enabled: bool | None = None
@@ -541,7 +549,16 @@ class MarstekProtocol:
         device_data.system_value_4 = struct.unpack("<H", payload[7:9])[0]
         device_data.system_value_5 = struct.unpack("<H", payload[9:11])[0]
 
+        device_data.grid_frequency = device_data.system_value_1 / 10.0
+        device_data.grid_voltage = device_data.system_value_2 / 10.0
+        device_data.grid_connected = (
+            device_data.grid_voltage >= GRID_PRESENT_MIN_VOLTAGE
+        )
+
         for field in (
+            "grid_frequency",
+            "grid_voltage",
+            "grid_connected",
             "system_status",
             "system_value_1",
             "system_value_2",

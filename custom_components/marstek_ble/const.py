@@ -21,6 +21,11 @@ MODEL_VENUS_E = "Venus E"
 MODEL_VENUS_E_V3 = "Venus E 3.0"
 MODEL_V500 = "V500"
 
+# Grid presence (Venus E): system data 0x0D carries grid frequency and voltage.
+# Polled every GRID_POLL_INTERVAL seconds so outage detection reacts quickly.
+GRID_POLL_INTERVAL = 5
+GRID_PRESENT_MIN_VOLTAGE = 150.0  # V; measured 217.9 V on-grid, 10.0 V off-grid
+
 # The V500 answers slower than the Venus E (~2-2.5 s per request).
 RESPONSE_TIMEOUT_DEFAULT = 2.0
 RESPONSE_TIMEOUT_V500 = 4.0

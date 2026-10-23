@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfElectricCurrent,
+    UnitOfFrequency,
     UnitOfElectricPotential,
     UnitOfEnergy,
     UnitOfPower,
@@ -493,6 +494,34 @@ async def async_setup_entry(
             entity_category=EntityCategory.DIAGNOSTIC,
         ),
     ]
+
+    # Grid sensors (from system data 0x0D)
+    entities.extend(
+        [
+            MarstekSensor(
+                coordinator,
+                entry,
+                "grid_voltage",
+                "Grid Voltage",
+                lambda data: data.grid_voltage,
+                UnitOfElectricPotential.VOLT,
+                SensorDeviceClass.VOLTAGE,
+                SensorStateClass.MEASUREMENT,
+                suggested_display_precision=1,
+            ),
+            MarstekSensor(
+                coordinator,
+                entry,
+                "grid_frequency",
+                "Grid Frequency",
+                lambda data: data.grid_frequency,
+                UnitOfFrequency.HERTZ,
+                SensorDeviceClass.FREQUENCY,
+                SensorStateClass.MEASUREMENT,
+                suggested_display_precision=1,
+            ),
+        ]
+    )
 
     # Add cell voltage sensors
     for i in range(16):

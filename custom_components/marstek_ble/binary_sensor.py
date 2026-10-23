@@ -57,6 +57,14 @@ async def async_setup_entry(
         MarstekBinarySensor(
             coordinator,
             entry,
+            "grid_connected",
+            "Grid Connected",
+            lambda data: data.grid_connected,
+            BinarySensorDeviceClass.POWER,
+        ),
+        MarstekBinarySensor(
+            coordinator,
+            entry,
             "wifi_connected",
             "WiFi Connected",
             lambda data: data.wifi_connected,

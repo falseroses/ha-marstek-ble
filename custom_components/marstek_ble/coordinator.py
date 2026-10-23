@@ -35,6 +35,7 @@ from .const import (
     CMD_TIMER_INFO,
     CMD_WIFI_SSID,
     DEFAULT_MEDIUM_POLL_INTERVAL,
+    GRID_POLL_INTERVAL,
     BACKOFF_INTERVALS,
     DEFAULT_POLL_INTERVAL,
     MAX_MEDIUM_POLL_INTERVAL,
@@ -437,6 +438,12 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         # BMS data - now waits for actual response (not supported by the V500)
         if not self.is_v500:
             await self._safe_send_and_sleep(CMD_BMS_DATA, delay=0.1)
+
+            # System data carries grid voltage/frequency -> poll it often enough
+            # for outage detection (medium poll alone is only every ~60 s).
+            grid_cycle = max(1, math.ceil(GRID_POLL_INTERVAL / self._poll_interval))
+            if self._fast_poll_count % grid_cycle == 0:
+                await self._safe_send_and_sleep(CMD_SYSTEM_DATA, delay=0.1)
 
         VERBOSE_LOGGER.debug(
             "[%s/%s] Polling fast data - coordinator.data after: battery_voltage=%s, battery_soc=%s",
