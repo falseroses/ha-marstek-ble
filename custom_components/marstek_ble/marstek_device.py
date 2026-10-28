@@ -29,6 +29,10 @@ DEVICE_DEBUG.setLevel(logging.INFO)
 CHAR_WRITE_UUID = "0000ff01-0000-1000-8000-00805f9b34fb"
 CHAR_NOTIFY_UUID = "0000ff02-0000-1000-8000-00805f9b34fb"
 
+CONNECT_TIMEOUT = 90.0  # s, upper bound for establish_connection incl. retries
+WRITE_TIMEOUT = 10.0  # s, a GATT write must never block the poll loop forever
+MAX_NO_RESPONSE_BEFORE_RECONNECT = 5
+
 
 @dataclass
 class MarstekData:
@@ -864,6 +868,10 @@ class MarstekBLEDevice:
         self._pending_command: int | None = None
         self._response_event: asyncio.Event | None = None
         self._response_data: bytes | None = None
+        # Watchdog: a link can stay "connected" while the device no longer
+        # answers (or a GATT write never returns). Force a fresh connection.
+        self._consecutive_no_response = 0
+        self.forced_reconnects = 0
 
     @property
     def name(self) -> str:
@@ -906,14 +914,15 @@ class MarstekBLEDevice:
                 )
 
             try:
-                self._client = await establish_connection(
-                    BleakClientWithServiceCache,
-                    self._ble_device,
-                    self._device_name,
-                    disconnected_callback=self._on_disconnect,
-                    use_services_cache=True,
-                    ble_device_callback=self._ble_device_callback,
-                )
+                async with asyncio.timeout(CONNECT_TIMEOUT):
+                    self._client = await establish_connection(
+                        BleakClientWithServiceCache,
+                        self._ble_device,
+                        self._device_name,
+                        disconnected_callback=self._on_disconnect,
+                        use_services_cache=True,
+                        ble_device_callback=self._ble_device_callback,
+                    )
                 _LOGGER.debug("%s: Connected successfully", self._device_name)
 
                 # Start notifications if callback provided
@@ -1028,7 +1037,8 @@ class MarstekBLEDevice:
                         retry,
                     )
 
-                    await self._client.write_gatt_char(CHAR_WRITE_UUID, command_data)
+                    async with asyncio.timeout(WRITE_TIMEOUT):
+                        await self._client.write_gatt_char(CHAR_WRITE_UUID, command_data)
                     self._last_command_time = wall_time
                     VERBOSE_LOGGER.debug(
                         "%s TX (addr=%s handle=%s) cmd=0x%02X payload=%s",
@@ -1059,21 +1069,33 @@ class MarstekBLEDevice:
                             self._response_event.wait(), timeout=self._response_timeout
                         )
                         response_received = True
+                        self._consecutive_no_response = 0
                         VERBOSE_LOGGER.debug(
                             "%s: Command 0x%02X sent and response received",
                             self._device_name,
                             cmd
                         )
                     except asyncio.TimeoutError:
+                        self._consecutive_no_response += 1
                         _LOGGER.debug(
-                            "%s: Timeout waiting for response to command 0x%02X",
+                            "%s: Timeout waiting for response to command 0x%02X (%d in a row)",
                             self._device_name,
-                            cmd
+                            cmd,
+                            self._consecutive_no_response,
                         )
                     finally:
                         # Clear waiting state
                         self._pending_command = None
                         self._response_event = None
+
+                    if self._consecutive_no_response >= MAX_NO_RESPONSE_BEFORE_RECONNECT:
+                        _LOGGER.warning(
+                            "%s: %d commands in a row without answer on an open "
+                            "connection; dropping it and reconnecting",
+                            self._device_name,
+                            self._consecutive_no_response,
+                        )
+                        await self._drop_connection()
 
                     duration = time.monotonic() - start_time
                     self._record_command_result(
@@ -1131,6 +1153,21 @@ class MarstekBLEDevice:
                 error=last_error,
             )
             return False
+
+    async def _drop_connection(self) -> None:
+        """Abandon the current (possibly half-dead) link so the next command reconnects."""
+        client, self._client = self._client, None
+        self._notifications_started = False
+        self._consecutive_no_response = 0
+        self.forced_reconnects += 1
+        if client is None:
+            return
+        self._expected_disconnect = True
+        try:
+            async with asyncio.timeout(10):
+                await client.disconnect()
+        except Exception as ex:  # noqa: BLE001
+            _LOGGER.debug("%s: Error while dropping connection: %s", self._device_name, ex)
 
     async def disconnect(self) -> None:
         """Disconnect from the device."""
@@ -1309,6 +1346,8 @@ class MarstekBLEDevice:
             "device_name": self._device_name,
             "address": self.address,
             "connected": self.is_connected,
+            "forced_reconnects": self.forced_reconnects,
+            "consecutive_no_response": self._consecutive_no_response,
             "overall": {
                 "total_sent": overall_sent,
                 "success": overall_success,
