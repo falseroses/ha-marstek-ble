@@ -59,6 +59,8 @@ VERBOSE_LOGGER.setLevel(logging.INFO)
 # Optional commands that time out this many times in a row (while the device
 # otherwise answers) are treated as unsupported and no longer polled.
 UNSUPPORTED_AFTER_FAILURES = 3
+# Re-probe skipped commands now and then in case the device answers again.
+UNSUPPORTED_RETRY_SECONDS = 15 * 60
 
 
 class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
@@ -111,7 +113,12 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         self._backoff_until: float | None = None
         # Commands this device does not answer (e.g. 0x1C on Venus E 3.0)
         self._cmd_failures: dict[int, int] = {}
-        self._unsupported_cmds: set[int] = set()
+        # command -> monotonic time it was marked unsupported
+        self._unsupported_cmds: dict[int, float] = {}
+        # Commands that have answered at least once are never marked unsupported:
+        # a temporary silence (e.g. while the device switches to backup power)
+        # must not stop e.g. BMS polling for good.
+        self._cmd_ever_ok: set[int] = set()
         self._initial_poll_done = False
         self._update_poll_schedule()
 
@@ -170,24 +177,29 @@ class MarstekDataUpdateCoordinator(ActiveBluetoothDataUpdateCoordinator[None]):
         self, command: int, payload: bytes = b"", delay: float = 0.3
     ) -> bool:
         """Best-effort version of _send_and_sleep that logs and continues on failure."""
-        if command in self._unsupported_cmds:
-            return False
+        skipped_at = self._unsupported_cmds.get(command)
+        if skipped_at is not None:
+            if time.monotonic() - skipped_at < UNSUPPORTED_RETRY_SECONDS:
+                return False
+            del self._unsupported_cmds[command]  # time to probe it again
         try:
             await self._send_and_sleep(command, payload, delay)
             self._cmd_failures[command] = 0
+            self._cmd_ever_ok.add(command)
             return True
         except Exception as err:  # noqa: BLE001
             failures = self._cmd_failures.get(command, 0) + 1
             self._cmd_failures[command] = failures
             if (
                 command != CMD_RUNTIME_INFO
+                and command not in self._cmd_ever_ok
                 and failures >= UNSUPPORTED_AFTER_FAILURES
                 and self.data.field_updates
             ):
-                self._unsupported_cmds.add(command)
+                self._unsupported_cmds[command] = time.monotonic()
                 _LOGGER.info(
-                    "[%s/%s] Command 0x%02X not answered %s times; treating it as "
-                    "unsupported by this device and no longer polling it",
+                    "[%s/%s] Command 0x%02X never answered (%s tries); skipping it "
+                    "(re-checked every 15 min)",
                     self.device_name,
                     self.address,
                     command,
